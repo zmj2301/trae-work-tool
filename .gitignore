@@ -1,0 +1,10 @@
+config.json
+trae_usage_data.json
+trae_signin_history.json
+trae_profile/
+trae_storage_state.json
+trae_usage_card.html
+__pycache__/
+*.pyc
+.env
+*.bak

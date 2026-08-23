@@ -1,0 +1,278 @@
+"""生成 index.html（实时数据版本）"""
+import json
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+
+CSS = """
+:root{--bg:#0b0e14;--panel:#0d1117;--panel2:#111726;--line:#1c2436;--txt:#e6edf3;--muted:#8b96a8;--dim:#5b6678;--acc:#6c5ce7;--acc2:#00cec9;--green:#2ecc71;--warn:#f39c12;--red:#e74c3c;--grad:linear-gradient(135deg,#6c5ce7,#00cec9)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;padding:24px 16px;background-image:radial-gradient(900px 400px at 15% -5%,rgba(108,92,231,.12),transparent 60%),radial-gradient(700px 350px at 95% 0%,rgba(0,206,201,.10),transparent 60%)}
+.wrap{max-width:960px;margin:0 auto}
+.head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:42px;height:42px;border-radius:11px;background:var(--grad);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;box-shadow:0 4px 20px rgba(108,92,231,.45)}
+.brand h1{font-size:20px;letter-spacing:.5px}
+.brand .sub{font-size:12px;color:var(--muted)}
+.status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:6px 14px;cursor:pointer;transition:border-color .2s}
+.status:hover{border-color:var(--acc)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+.dot.off{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;overflow:hidden}
+.kpi::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:var(--grad);opacity:.85}
+.kpi .label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.kpi .value{font-size:26px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums}
+.kpi .unit{font-size:12px;color:var(--muted);font-weight:400;margin-left:2px}
+.kpi .trend{font-size:11px;margin-top:4px;color:var(--dim)}
+.kpi .val-acc{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+.card h3{font-size:13px;color:var(--muted);font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600}
+.badge.on{background:rgba(46,204,113,.14);color:var(--green);border:1px solid rgba(46,204,113,.4)}
+.badge.off{background:rgba(243,156,18,.12);color:var(--warn);border:1px solid rgba(243,156,18,.4)}
+.sign-main{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.sign-credit{font-size:34px;font-weight:800;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sign-credit small{font-size:13px;font-weight:400;-webkit-text-fill-color:var(--muted)}
+.week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:14px}
+.wday{text-align:center}
+.wday .wd{font-size:10px;color:var(--dim);margin-bottom:4px}
+.wday .cell{height:30px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--dim)}
+.wday .cell.on{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(108,92,231,.4)}
+.wday .cell.miss{background:rgba(231,76,60,.12);color:var(--red);border-color:rgba(231,76,60,.35)}
+.wday .cell.today{border-color:var(--acc2)}
+.wday .cell.future{border-style:dashed;opacity:.45}
+.wday .cell.unknown{border-style:dashed;opacity:.35}
+.chart{display:flex;align-items:flex-end;gap:10px;height:150px;padding:6px 4px 0}
+.bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:flex-end}
+.bar-track{width:100%;max-width:44px;height:100%;display:flex;align-items:flex-end;background:var(--panel2);border-radius:6px;position:relative;overflow:hidden}
+.bar{width:100%;border-radius:6px;background:var(--grad);min-height:2px;transition:height .6s cubic-bezier(.2,.8,.2,1)}
+.bar.hot{box-shadow:0 0 14px rgba(108,92,231,.5)}
+.bar-val{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.bar-date{font-size:11px;color:var(--dim)}
+.legend{font-size:11px;color:var(--dim);margin-top:8px;display:flex;gap:14px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--dim);font-weight:500;font-size:11px;padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid rgba(28,36,54,.6);font-variant-numeric:tabular-nums}
+tr:hover td{background:rgba(108,92,231,.05)}
+.mini-bar{height:5px;border-radius:3px;background:var(--grad);display:inline-block;vertical-align:middle;margin-left:8px}
+.day-cell{display:flex;align-items:center}
+.day-cell .dd{min-width:86px}
+.pill{font-size:10px;padding:2px 8px;border-radius:10px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+.foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px}
+.btn{display:inline-flex;align-items:center;gap:6px;border:none;cursor:pointer;font-size:13px;font-weight:600;padding:9px 16px;border-radius:10px;color:#fff;background:var(--grad);transition:filter .15s,transform .1s}
+.btn:hover{filter:brightness(1.1)}
+.btn:active{transform:translateY(1px)}
+.btn.ghost{background:var(--panel2);color:var(--txt);border:1px solid var(--line)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.tags{display:flex;gap:8px;flex-wrap:wrap}
+.tag{font-size:11px;color:var(--muted);padding:4px 10px;border-radius:8px;background:var(--panel);border:1px solid var(--line)}
+.tag b{color:var(--acc2)}
+.hint{font-size:11px;color:var(--dim);margin-top:8px}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);background:var(--panel);border:1px solid var(--acc);color:var(--txt);padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:99;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+.spinner{width:14px;height:14px;border:2px solid var(--dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;display:inline-block}
+#loading{text-align:center;padding:60px;color:var(--muted);font-size:14px}
+@media(max-width:720px){.kpis{grid-template-columns:repeat(2,1fr)}.row{grid-template-columns:1fr}}
+"""
+
+JS = r"""
+function fmt(n){return (Math.round(n*100)/100).toLocaleString('zh-CN')}
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
+
+function renderAll(DATA){
+  document.getElementById('loading')?.remove();
+  document.getElementById('app').style.display='block';
+
+  document.getElementById('subline').textContent=
+    '数据更新于 '+DATA.fetched_at+'  ·  '+DATA.user.username+' · '+DATA.user.product;
+
+  const u=DATA.overall_usage||{total_limit:0,total_used:0,remaining:0};
+  const today=DATA.daily[DATA.daily.length-1];
+  const kpis=[
+    {label:'今日消耗',value:fmt(today.consumed),unit:'积分',trend:today.sessions+' 个会话',cls:''},
+    {label:'本月累计',value:fmt(DATA.month_total),unit:'积分',trend:'截止今日',cls:'val-acc'},
+    {label:'剩余积分',value:fmt(u.remaining),unit:'积分',trend:'总额 '+fmt(u.total_limit),cls:'val-acc'},
+    {label:'连续签到',value:DATA.continuous_days,unit:'天',trend:'今日已领 '+(DATA.checkin?.credits||0),cls:''},
+  ];
+  document.getElementById('kpis').innerHTML=kpis.map(k=>
+    '<div class="kpi"><div class="label">'+k.label+'</div><div class="value '+k.cls+'">'+k.value+'<span class="unit">'+k.unit+'</span></div><div class="trend">'+k.trend+'</div></div>'
+  ).join('');
+
+  const ci=DATA.checkin||{};
+  const badge=document.getElementById('badge');
+  if(ci.checked_in){badge.className='badge on';badge.textContent='\u2714 今日已签到'}
+  else{badge.className='badge off';badge.textContent='\u2718 今日未签到'}
+  document.getElementById('sign-credit').innerHTML=fmt(ci.credits||0)+'<small> 积分</small>';
+  document.getElementById('streak').innerHTML='连续签到 <b style="color:var(--acc2)">'+(DATA.continuous_days||0)+'</b> 天';
+  document.getElementById('sign-note').textContent=ci.checked_in?'每日签到 +'+fmt(ci.credits||0)+' 积分':'去 TRAE 完成今日签到';
+
+  (function(){
+    const now=new Date();const monday=new Date(now);monday.setDate(now.getDate()-((now.getDay()+6)%7));
+    const hist=DATA.signin_history||{};const wd=['一','二','三','四','五','六','日'];
+    const html=[];
+    for(let i=0;i<7;i++){const d=new Date(monday);d.setDate(monday.getDate()+i);
+      const key=d.toISOString().slice(0,10);const isFuture=d>now;const isToday=d.toDateString()===now.toDateString();
+      const rec=hist[key];let cls='cell';
+      if(isFuture)cls+=' future';else if(rec===true)cls+=' on';else if(rec===false)cls+=' miss';else cls+=' unknown';
+      if(isToday)cls+=' today';
+      html.push('<div class="wday"><div class="wd">周'+wd[i]+(isToday?'\u00b7今':'')+'</div><div class="'+cls+'">'+(rec===true?'\u2714':isFuture?'\u00b7':isToday?'\u2026':'')+'</div></div>');
+    }
+    document.getElementById('week').innerHTML=html.join('');
+  })();
+
+  (function(){
+    const ds=DATA.daily;const max=Math.max(...ds.map(d=>d.consumed),1);
+    const maxIdx=ds.reduce((a,d,i)=>d.consumed>ds[a].consumed?i:a,0);
+    document.getElementById('chart').innerHTML=ds.map((d,i)=>{
+      const h=Math.max(d.consumed/max*100,2);const hot=i===maxIdx&&d.consumed>0;
+      return '<div class="bar-col" title="'+d.date+' 消耗 '+fmt(d.consumed)+' 积分 ('+d.sessions+' 会话)"><div class="bar-val">'+fmt(d.consumed)+'</div><div class="bar-track"><div class="bar '+(hot?'hot':'')+'" style="height:'+h+'%"></div></div><div class="bar-date">'+d.date.slice(5).replace('-','/')+'</div></div>';
+    }).join('');
+  })();
+
+  (function(){
+    const ds=DATA.daily,m=DATA.month_total||1;
+    document.getElementById('tbody').innerHTML=ds.slice().reverse().map(d=>{
+      const ratio=d.consumed/m*100;
+      const top=d.details&&d.details.length?Math.max(...d.details.map(x=>x.credits)):0;
+      return '<tr><td><div class="day-cell"><span class="dd">'+d.date+'</span>'+(d.days_ago===0?'<span class="pill">今天</span>':'')+'</div></td><td>'+fmt(d.consumed)+'</td><td>'+d.sessions+'</td><td><span style="color:var(--muted)">'+ratio.toFixed(1)+'%</span><span class="mini-bar" style="width:'+Math.max(ratio*2,2)+'px"></span></td><td>'+fmt(top)+'</td></tr>';
+    }).join('');
+  })();
+}
+
+let lastFetchAt=0;
+async function loadData(){
+  try{
+    const r=await fetch('/api/data?t='+Date.now());
+    const DATA=await r.json();
+    if(DATA.error){document.getElementById('loading').textContent='数据加载失败: '+DATA.error;return}
+    renderAll(DATA);
+    lastFetchAt=new Date(DATA.fetched_at).getTime()||Date.now();
+  }catch(e){
+    document.getElementById('loading').textContent='无法连接服务器: '+e.message;
+  }
+}
+
+async function checkUpdate(){
+  try{
+    const r=await fetch('/api/status');
+    const s=await r.json();
+    if(s.last_refresh>lastFetchAt/1000+5){loadData();toast('数据已自动更新')}
+  }catch(e){}
+}
+
+async function doRefresh(){
+  const btn=document.getElementById('btn-refresh');
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 抓取中...';
+  document.getElementById('runstate').textContent='正在抓取...';
+  try{
+    await fetch('/api/refresh');
+    toast('抓取已启动，请等待约60秒');
+    setTimeout(()=>{loadData();btn.disabled=false;btn.innerHTML='\u{1F504} 立即抓取'},65000);
+  }catch(e){
+    toast('刷新失败: '+e.message);btn.disabled=false;btn.innerHTML='\u{1F504} 立即抓取';
+  }
+}
+
+function exportCSV(){
+  fetch('/api/data').then(r=>r.json()).then(DATA=>{
+    const rows=[['日期','消耗积分','会话数','最高单次'],...DATA.daily.map(d=>[
+      d.date,d.consumed,d.sessions,d.details&&d.details.length?Math.max(...d.details.map(x=>x.credits)):0])];
+    const csv=rows.map(r=>r.join(',')).join('\n');
+    const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download='trae_usage_'+new Date().toISOString().slice(0,10)+'.csv';a.click();
+    toast('CSV 已导出');
+  });
+}
+
+window.addEventListener('DOMContentLoaded',()=>{
+  loadData();
+  setInterval(checkUpdate,60*1000);
+});
+"""
+
+BODY = """
+<div class="wrap">
+  <div class="head">
+    <div class="brand">
+      <div class="logo">T</div>
+      <div>
+        <h1>TRAE 用量监控面板</h1>
+        <div class="sub" id="subline">加载中...</div>
+      </div>
+    </div>
+    <div class="status" id="status-dot" onclick="doRefresh()">
+      <span class="dot" id="dot"></span>
+      <span id="runstate">已就绪 · 点击刷新</span>
+    </div>
+  </div>
+
+  <div id="loading"><span class="spinner"></span> 加载数据中...</div>
+  <div id="app" style="display:none">
+    <div class="kpis" id="kpis"></div>
+    <div class="row">
+      <div class="card">
+        <h3>⛳ 今日签到</h3>
+        <div class="sign-main">
+          <div>
+            <span class="badge" id="badge">--</span>
+            <div style="margin-top:8px" class="sign-credit" id="sign-credit">--<small> 积分</small></div>
+          </div>
+          <div style="text-align:right;font-size:12px;color:var(--muted)">
+            <div id="streak">连续签到 <b style="color:var(--acc2)">--</b> 天</div>
+            <div style="margin-top:4px" id="sign-note">--</div>
+          </div>
+        </div>
+        <div class="week" id="week"></div>
+      </div>
+      <div class="card">
+        <h3>📊 最近7天消耗</h3>
+        <div class="chart" id="chart"></div>
+        <div class="legend"><span>▪ 峰值日高亮</span><span>▪ 悬停查看数值</span></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:0">
+      <h3>🗓 每日明细</h3>
+      <table>
+        <thead><tr><th>日期</th><th>消耗积分</th><th>会话数</th><th>占比(月累计)</th><th>最高单次</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="foot">
+      <div>
+        <button class="btn" id="btn-refresh" onclick="doRefresh()">🔄 立即抓取</button>
+        <button class="btn ghost" style="margin-left:8px" onclick="exportCSV()">📥 导出CSV</button>
+      </div>
+      <div class="tags">
+        <span class="tag">⚙️ <b>Python</b></span>
+        <span class="tag">🔑 <b>refresh_token</b></span>
+        <span class="tag">🚀 <b>TRAE API</b></span>
+        <span class="tag">🖥 <b>Real-time</b></span>
+      </div>
+    </div>
+    <div class="hint">数据每分钟自动检查更新 · 后台服务器定时抓取</div>
+  </div>
+</div>
+<div id="toast"></div>
+"""
+
+HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRAE 用量监控面板</title>
+<style>""" + CSS + """</style>
+</head>
+<body>
+""" + BODY + """
+<script>""" + JS + """</script>
+</body>
+</html>"""
+
+(BASE / "index.html").write_text(HTML, encoding="utf-8")
+print("index.html generated")
