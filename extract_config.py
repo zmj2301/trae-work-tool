@@ -101,6 +101,7 @@ def main():
         "refresh_token": auth.get("refreshToken", ""),
         "access_token": auth.get("token", ""),
         "token_expired_at": auth.get("expiredAt", 0),
+        "refresh_expired_at": old_cfg.get("refresh_expired_at") or auth.get("refreshExpiredAt", ""),
         "private_key_pem": (device or {}).get("privateKeyPEM", ""),
         "public_key_pem": (device or {}).get("publicKeyPEM", ""),
         "user_id": old_cfg.get("user_id") or user_id,
