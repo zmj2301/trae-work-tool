@@ -1,8 +1,15 @@
-"""生成 index.html（实时数据版本）"""
+"""生成 TRAE 用量监控页面
+
+两种模式:
+  python gen_index.py              # 生成静态页面 trae_usage_card.html（可直接双击打开）
+  python gen_index.py --server     # 生成 index.html（配合 serve.py 使用，从 /api/data 加载）
+"""
+import argparse
 import json
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
+DATA_FILE = BASE / "trae_usage_data.json"
 
 CSS = """
 :root{--bg:#0b0e14;--panel:#0d1117;--panel2:#111726;--line:#1c2436;--txt:#e6edf3;--muted:#8b96a8;--dim:#5b6678;--acc:#6c5ce7;--acc2:#00cec9;--green:#2ecc71;--warn:#f39c12;--red:#e74c3c;--grad:linear-gradient(135deg,#6c5ce7,#00cec9)}
@@ -17,12 +24,11 @@ body{font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:va
 .status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:6px 14px;cursor:pointer;transition:border-color .2s}
 .status:hover{border-color:var(--acc)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
-.dot.off{background:var(--warn);box-shadow:0 0 8px var(--warn)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;overflow:hidden}
 .kpi::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:var(--grad);opacity:.85}
-.kpi .label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.kpi .label{font-size:12px;color:var(--muted)}
 .kpi .value{font-size:26px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums}
 .kpi .unit{font-size:12px;color:var(--muted);font-weight:400;margin-left:2px}
 .kpi .trend{font-size:11px;margin-top:4px;color:var(--dim)}
@@ -66,7 +72,6 @@ tr:hover td{background:rgba(108,92,231,.05)}
 .btn:hover{filter:brightness(1.1)}
 .btn:active{transform:translateY(1px)}
 .btn.ghost{background:var(--panel2);color:var(--txt);border:1px solid var(--line)}
-.btn:disabled{opacity:.5;cursor:not-allowed}
 .tags{display:flex;gap:8px;flex-wrap:wrap}
 .tag{font-size:11px;color:var(--muted);padding:4px 10px;border-radius:8px;background:var(--panel);border:1px solid var(--line)}
 .tag b{color:var(--acc2)}
@@ -80,15 +85,14 @@ tr:hover td{background:rgba(108,92,231,.05)}
 """
 
 JS = r"""
-function fmt(n){return (Math.round(n*100)/100).toLocaleString('zh-CN')}
+function fmt(n){return(Math.round(n*100)/100).toLocaleString('zh-CN')}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
 
 function renderAll(DATA){
   document.getElementById('loading')?.remove();
   document.getElementById('app').style.display='block';
-
   document.getElementById('subline').textContent=
-    '数据更新于 '+DATA.fetched_at+'  ·  '+DATA.user.username+' · '+DATA.user.product;
+    '数据更新于 '+DATA.fetched_at+'  \u00b7  '+DATA.user.username+' \u00b7 '+DATA.user.product;
 
   const u=DATA.overall_usage||{total_limit:0,total_used:0,remaining:0};
   const today=DATA.daily[DATA.daily.length-1];
@@ -108,18 +112,18 @@ function renderAll(DATA){
   else{badge.className='badge off';badge.textContent='\u2718 今日未签到'}
   document.getElementById('sign-credit').innerHTML=fmt(ci.credits||0)+'<small> 积分</small>';
   document.getElementById('streak').innerHTML='连续签到 <b style="color:var(--acc2)">'+(DATA.continuous_days||0)+'</b> 天';
-  document.getElementById('sign-note').textContent=ci.checked_in?'每日签到 +'+fmt(ci.credits||0)+' 积分':'去 TRAE 完成今日签到';
+  document.getElementById('sign-note').textContent=ci.checked_in?'\u6bcf\u65e5\u7b7e\u5230 +'+fmt(ci.credits||0)+' \u79ef\u5206':'\u53bb TRAE \u5b8c\u6210\u4eca\u65e5\u7b7e\u5230';
 
   (function(){
     const now=new Date();const monday=new Date(now);monday.setDate(now.getDate()-((now.getDay()+6)%7));
-    const hist=DATA.signin_history||{};const wd=['一','二','三','四','五','六','日'];
+    const hist=DATA.signin_history||{};const wd=['\u4e00','\u4e8c','\u4e09','\u56db','\u4e94','\u516d','\u65e5'];
     const html=[];
     for(let i=0;i<7;i++){const d=new Date(monday);d.setDate(monday.getDate()+i);
       const key=d.toISOString().slice(0,10);const isFuture=d>now;const isToday=d.toDateString()===now.toDateString();
       const rec=hist[key];let cls='cell';
       if(isFuture)cls+=' future';else if(rec===true)cls+=' on';else if(rec===false)cls+=' miss';else cls+=' unknown';
       if(isToday)cls+=' today';
-      html.push('<div class="wday"><div class="wd">周'+wd[i]+(isToday?'\u00b7今':'')+'</div><div class="'+cls+'">'+(rec===true?'\u2714':isFuture?'\u00b7':isToday?'\u2026':'')+'</div></div>');
+      html.push('<div class="wday"><div class="wd">\u5468'+wd[i]+(isToday?'\u00b7\u4eca':'')+'</div><div class="'+cls+'">'+(rec===true?'\u2714':isFuture?'\u00b7':isToday?'\u2026':'')+'</div></div>');
     }
     document.getElementById('week').innerHTML=html.join('');
   })();
@@ -129,7 +133,7 @@ function renderAll(DATA){
     const maxIdx=ds.reduce((a,d,i)=>d.consumed>ds[a].consumed?i:a,0);
     document.getElementById('chart').innerHTML=ds.map((d,i)=>{
       const h=Math.max(d.consumed/max*100,2);const hot=i===maxIdx&&d.consumed>0;
-      return '<div class="bar-col" title="'+d.date+' 消耗 '+fmt(d.consumed)+' 积分 ('+d.sessions+' 会话)"><div class="bar-val">'+fmt(d.consumed)+'</div><div class="bar-track"><div class="bar '+(hot?'hot':'')+'" style="height:'+h+'%"></div></div><div class="bar-date">'+d.date.slice(5).replace('-','/')+'</div></div>';
+      return '<div class="bar-col" title="'+d.date+' \u6d88\u8017 '+fmt(d.consumed)+' \u79ef\u5206 ('+d.sessions+' \u4f1a\u8bdd)"><div class="bar-val">'+fmt(d.consumed)+'</div><div class="bar-track"><div class="bar '+(hot?'hot':'')+'" style="height:'+h+'%"></div></div><div class="bar-date">'+d.date.slice(5).replace('-','/')+'</div></div>';
     }).join('');
   })();
 
@@ -138,55 +142,63 @@ function renderAll(DATA){
     document.getElementById('tbody').innerHTML=ds.slice().reverse().map(d=>{
       const ratio=d.consumed/m*100;
       const top=d.details&&d.details.length?Math.max(...d.details.map(x=>x.credits)):0;
-      return '<tr><td><div class="day-cell"><span class="dd">'+d.date+'</span>'+(d.days_ago===0?'<span class="pill">今天</span>':'')+'</div></td><td>'+fmt(d.consumed)+'</td><td>'+d.sessions+'</td><td><span style="color:var(--muted)">'+ratio.toFixed(1)+'%</span><span class="mini-bar" style="width:'+Math.max(ratio*2,2)+'px"></span></td><td>'+fmt(top)+'</td></tr>';
+      return '<tr><td><div class="day-cell"><span class="dd">'+d.date+'</span>'+(d.days_ago===0?'<span class="pill">\u4eca\u5929</span>':'')+'</div></td><td>'+fmt(d.consumed)+'</td><td>'+d.sessions+'</td><td><span style="color:var(--muted)">'+ratio.toFixed(1)+'%</span><span class="mini-bar" style="width:'+Math.max(ratio*2,2)+'px"></span></td><td>'+fmt(top)+'</td></tr>';
     }).join('');
   })();
 }
 
 let lastFetchAt=0;
+let serverMode=false;
+
 async function loadData(){
+  if(!serverMode){renderAll(EMBEDDED_DATA);return}
   try{
     const r=await fetch('/api/data?t='+Date.now());
     const DATA=await r.json();
-    if(DATA.error){document.getElementById('loading').textContent='数据加载失败: '+DATA.error;return}
+    if(DATA.error){document.getElementById('loading').textContent='\u6570\u636e\u52a0\u8f7d\u5931\u8d25: '+DATA.error;return}
     renderAll(DATA);
     lastFetchAt=new Date(DATA.fetched_at).getTime()||Date.now();
   }catch(e){
-    document.getElementById('loading').textContent='无法连接服务器: '+e.message;
+    document.getElementById('loading').textContent='\u65e0\u6cd5\u8fde\u63a5\u670d\u52a1\u5668: '+e.message;
   }
 }
 
 async function checkUpdate(){
+  if(!serverMode)return;
   try{
     const r=await fetch('/api/status');
     const s=await r.json();
-    if(s.last_refresh>lastFetchAt/1000+5){loadData();toast('数据已自动更新')}
+    if(s.last_refresh>lastFetchAt/1000+5){loadData();toast('\u6570\u636e\u5df2\u81ea\u52a8\u66f4\u65b0')}
   }catch(e){}
 }
 
 async function doRefresh(){
+  if(!serverMode){toast('\u9759\u6001\u6a21\u5f0f\u4e0d\u652f\u6301\u5728\u7ebf\u5237\u65b0\uff0c\u8bf7\u91cd\u65b0\u8fd0\u884c python trae_usage_api.py');return}
   const btn=document.getElementById('btn-refresh');
-  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 抓取中...';
-  document.getElementById('runstate').textContent='正在抓取...';
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> \u6293\u53d6\u4e2d...';
+  document.getElementById('runstate').textContent='\u6b63\u5728\u6293\u53d6...';
   try{
     await fetch('/api/refresh');
-    toast('抓取已启动，请等待约60秒');
-    setTimeout(()=>{loadData();btn.disabled=false;btn.innerHTML='\u{1F504} 立即抓取'},65000);
+    toast('\u6293\u53d6\u5df2\u542f\u52a8\uff0c\u8bf7\u7b49\u5f85\u7ea660\u79d2');
+    setTimeout(()=>{loadData();btn.disabled=false;btn.innerHTML='\ud83d\udd04 \u7acb\u5373\u6293\u53d6'},65000);
   }catch(e){
-    toast('刷新失败: '+e.message);btn.disabled=false;btn.innerHTML='\u{1F504} 立即抓取';
+    toast('\u5237\u65b0\u5931\u8d25: '+e.message);btn.disabled=false;btn.innerHTML='\ud83d\udd04 \u7acb\u5373\u6293\u53d6';
   }
 }
 
 function exportCSV(){
-  fetch('/api/data').then(r=>r.json()).then(DATA=>{
-    const rows=[['日期','消耗积分','会话数','最高单次'],...DATA.daily.map(d=>[
-      d.date,d.consumed,d.sessions,d.details&&d.details.length?Math.max(...d.details.map(x=>x.credits)):0])];
-    const csv=rows.map(r=>r.join(',')).join('\n');
-    const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    a.download='trae_usage_'+new Date().toISOString().slice(0,10)+'.csv';a.click();
-    toast('CSV 已导出');
-  });
+  const DATA=serverMode?null:EMBEDDED_DATA;
+  if(DATA){buildCSV(DATA);return}
+  fetch('/api/data').then(r=>r.json()).then(buildCSV);
+}
+function buildCSV(DATA){
+  const rows=[['\u65e5\u671f','\u6d88\u8017\u79ef\u5206','\u4f1a\u8bdd\u6570','\u6700\u9ad8\u5355\u6b21'],...DATA.daily.map(d=>[
+    d.date,d.consumed,d.sessions,d.details&&d.details.length?Math.max(...d.details.map(x=>x.credits)):0])];
+  const csv=rows.map(r=>r.join(',')).join('\n');
+  const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='trae_usage_'+new Date().toISOString().slice(0,10)+'.csv';a.click();
+  toast('CSV \u5df2\u5bfc\u51fa');
 }
 
 window.addEventListener('DOMContentLoaded',()=>{
@@ -195,84 +207,131 @@ window.addEventListener('DOMContentLoaded',()=>{
 });
 """
 
-BODY = """
+BODY = r"""
 <div class="wrap">
   <div class="head">
     <div class="brand">
       <div class="logo">T</div>
       <div>
-        <h1>TRAE 用量监控面板</h1>
-        <div class="sub" id="subline">加载中...</div>
+        <h1>TRAE \u7528\u91cf\u76d1\u63a7\u9762\u677f</h1>
+        <div class="sub" id="subline">\u52a0\u8f7d\u4e2d...</div>
       </div>
     </div>
     <div class="status" id="status-dot" onclick="doRefresh()">
       <span class="dot" id="dot"></span>
-      <span id="runstate">已就绪 · 点击刷新</span>
+      <span id="runstate">\u5df2\u5c31\u7eea</span>
     </div>
   </div>
-
-  <div id="loading"><span class="spinner"></span> 加载数据中...</div>
+  <div id="loading"><span class="spinner"></span> \u52a0\u8f7d\u6570\u636e\u4e2d...</div>
   <div id="app" style="display:none">
     <div class="kpis" id="kpis"></div>
     <div class="row">
       <div class="card">
-        <h3>⛳ 今日签到</h3>
+        <h3>\u26f3 \u4eca\u65e5\u7b7e\u5230</h3>
         <div class="sign-main">
           <div>
             <span class="badge" id="badge">--</span>
-            <div style="margin-top:8px" class="sign-credit" id="sign-credit">--<small> 积分</small></div>
+            <div style="margin-top:8px" class="sign-credit" id="sign-credit">--<small> \u79ef\u5206</small></div>
           </div>
           <div style="text-align:right;font-size:12px;color:var(--muted)">
-            <div id="streak">连续签到 <b style="color:var(--acc2)">--</b> 天</div>
+            <div id="streak">\u8fde\u7eed\u7b7e\u5230 <b style="color:var(--acc2)">--</b> \u5929</div>
             <div style="margin-top:4px" id="sign-note">--</div>
           </div>
         </div>
         <div class="week" id="week"></div>
       </div>
       <div class="card">
-        <h3>📊 最近7天消耗</h3>
+        <h3>\ud83d\udcca \u6700\u8fd17\u5929\u6d88\u8017</h3>
         <div class="chart" id="chart"></div>
-        <div class="legend"><span>▪ 峰值日高亮</span><span>▪ 悬停查看数值</span></div>
+        <div class="legend"><span>\u25aa \u5cf0\u503c\u65e5\u9ad8\u4eae</span><span>\u25aa \u60ac\u505c\u67e5\u770b\u6570\u503c</span></div>
       </div>
     </div>
     <div class="card" style="margin-bottom:0">
-      <h3>🗓 每日明细</h3>
+      <h3>\ud83d\udcc5 \u6bcf\u65e5\u660e\u7ec6</h3>
       <table>
-        <thead><tr><th>日期</th><th>消耗积分</th><th>会话数</th><th>占比(月累计)</th><th>最高单次</th></tr></thead>
+        <thead><tr><th>\u65e5\u671f</th><th>\u6d88\u8017\u79ef\u5206</th><th>\u4f1a\u8bdd\u6570</th><th>\u5360\u6bd4(\u6708\u7d2f\u8ba1)</th><th>\u6700\u9ad8\u5355\u6b21</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
     <div class="foot">
       <div>
-        <button class="btn" id="btn-refresh" onclick="doRefresh()">🔄 立即抓取</button>
-        <button class="btn ghost" style="margin-left:8px" onclick="exportCSV()">📥 导出CSV</button>
+        <button class="btn" id="btn-refresh" onclick="doRefresh()">\ud83d\udd04 \u7acb\u5373\u6293\u53d6</button>
+        <button class="btn ghost" style="margin-left:8px" onclick="exportCSV()">\ud83d\udce5 \u5bfc\u51faCSV</button>
       </div>
       <div class="tags">
-        <span class="tag">⚙️ <b>Python</b></span>
-        <span class="tag">🔑 <b>refresh_token</b></span>
-        <span class="tag">🚀 <b>TRAE API</b></span>
-        <span class="tag">🖥 <b>Real-time</b></span>
+        <span class="tag">\u2699\ufe0f <b>Python</b></span>
+        <span class="tag">\ud83d\udd11 <b>refresh_token</b></span>
+        <span class="tag">\ud83d\ude80 <b>TRAE API</b></span>
       </div>
     </div>
-    <div class="hint">数据每分钟自动检查更新 · 后台服务器定时抓取</div>
+    <div class="hint" id="hint"></div>
   </div>
 </div>
 <div id="toast"></div>
 """
 
-HTML = """<!DOCTYPE html>
+
+def gen_static():
+    """生成静态页面，数据直接嵌入 HTML，可双击打开。"""
+    if not DATA_FILE.exists():
+        print("错误: trae_usage_data.json 不存在，请先运行 python trae_usage_api.py")
+        return
+    data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    data_json = json.dumps(data, ensure_ascii=False)
+
+    html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TRAE 用量监控面板</title>
-<style>""" + CSS + """</style>
+<title>TRAE \u7528\u91cf\u76d1\u63a7\u9762\u677f</title>
+<style>{CSS}</style>
 </head>
 <body>
-""" + BODY + """
-<script>""" + JS + """</script>
+{BODY}
+<script>
+const serverMode=false;
+const EMBEDDED_DATA={data_json};
+{JS}
+</script>
 </body>
 </html>"""
 
-(BASE / "index.html").write_text(HTML, encoding="utf-8")
-print("index.html generated")
+    out = BASE / "trae_usage_card.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"\u2713 \u9759\u6001\u9875\u9762\u5df2\u751f\u6210: {out}")
+    print("  \u53cc\u6253\u6253\u5f00\u5373\u53ef\u67e5\u770b\uff0c\u65e0\u9700\u670d\u52a1\u5668")
+
+
+def gen_server():
+    """生成服务器版 index.html，从 /api/data 加载数据。"""
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRAE \u7528\u91cf\u76d1\u63a7\u9762\u677f</title>
+<style>{CSS}</style>
+</head>
+<body>
+{BODY}
+<script>
+const serverMode=true;
+{JS}
+</script>
+</body>
+</html>"""
+
+    out = BASE / "index.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"\u2713 \u670d\u52a1\u5668\u7248\u9875\u9762\u5df2\u751f\u6210: {out}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="TRAE \u7528\u91cf\u76d1\u63a7\u9875\u9762\u751f\u6210\u5668")
+    parser.add_argument("--server", action="store_true", help="\u751f\u6210\u670d\u52a1\u5668\u7248 index.html")
+    args = parser.parse_args()
+    if args.server:
+        gen_server()
+    else:
+        gen_static()
