@@ -83,6 +83,7 @@ def main():
             pass
 
     # 构建配置
+    user_id = auth.get("userId", "")
     cfg = {
         "host": auth.get("host", "https://api.trae.cn"),
         "device_id": device_id or "",
@@ -102,6 +103,11 @@ def main():
         "token_expired_at": auth.get("expiredAt", 0),
         "private_key_pem": (device or {}).get("privateKeyPEM", ""),
         "public_key_pem": (device or {}).get("publicKeyPEM", ""),
+        "user_id": old_cfg.get("user_id") or user_id,
+        "username": old_cfg.get("username") or "",
+        "product": old_cfg.get("product") or "solo",
+        "dingtalk_webhook": old_cfg.get("dingtalk_webhook") or "",
+        "daily_consumption_alert_threshold": old_cfg.get("daily_consumption_alert_threshold", 200),
     }
 
     # 写入配置文件
@@ -110,18 +116,24 @@ def main():
     print()
     print("配置提取成功！")
     print()
-    print(f"  用户ID: {auth.get('userId', '未知')}")
+    print(f"  用户ID: {user_id}")
     print(f"  设备ID: {device_id or '未知'}")
     print(f"  机器ID: {cfg['machine_id'][:16]}...")
     print(f"  Token过期: {auth.get('expiredAt', '未知')}")
     print(f"  Refresh过期: {auth.get('refreshExpiredAt', '未知')}")
     print()
     print(f"配置已保存到: {OUT}")
-    print()
-    print("下一步:")
-    print("  1. 编辑 config.json，填入你的 user_id 和 username")
-    print("     (从 TRAE 仪表盘 URL 中获取)")
-    print("  2. 运行 python serve.py 启动监控面板")
+
+    if not cfg.get("username"):
+        print()
+        print("提示: username 未自动获取，请手动编辑 config.json 填入")
+        print("  从 TRAE 仪表盘 URL 获取: user_id=xxx&username=xxx")
+    else:
+        print()
+        print("下一步:")
+        print("  python trae_usage_api.py  # 抓取数据")
+        print("  python gen_index.py       # 生成页面")
+        print("  双击 trae_usage_card.html 查看")
 
 
 if __name__ == "__main__":
