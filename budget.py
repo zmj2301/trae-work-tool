@@ -45,26 +45,34 @@ def compute_budget(packs, recent_avg, today=None):
     alive = [dict(p) for p in packs if p.get("alive") and p.get("remaining", 0) > 0]
     total_alive = round(sum(p["remaining"] for p in alive), 2)
 
-    # --- 最近到期 TOP3（必须在模拟消耗前快照，否则会被清零）---
-    next_expiries = [
-        {"name": p["name"], "amount": p["remaining"], "expire_str": p["expire_str"]}
-        for p in sorted(alive, key=lambda x: x["expire_time"])[:3]
-    ]
-
-    # --- 到期事件按天分组 ---
+    # --- 到期事件按天分组（含包组成明细）---
     events = {}
     for p in alive:
         d = datetime.fromtimestamp(p["expire_time"]).replace(
             hour=0, minute=0, second=0, microsecond=0)
-        events[d] = events.get(d, 0.0) + p["remaining"]
+        ev = events.setdefault(d, {"amount": 0.0, "items": {}})
+        ev["amount"] += p["remaining"]
+        ev["items"][p["name"]] = ev["items"].get(p["name"], 0.0) + p["remaining"]
     sorted_events = sorted(events.items())
+
+    # 即将到期明细（按日聚合，最多展示前4个事件日）
+    expiry_events = [
+        {
+            "date": d.strftime("%m-%d"),
+            "amount": round(v["amount"], 1),
+            "items": [{"name": n, "amount": round(a, 1)}
+                      for n, a in sorted(v["items"].items(), key=lambda kv: -kv[1])],
+        }
+        for d, v in sorted_events[:4]
+    ]
 
     # --- 防浪费底线 ---
     # FIFO 假设下, 到第 k 个事件日(含)之前累计消耗必须 >= 前 k 个事件的量
     must_use = 0.0
     critical_event = None
     cum = 0.0
-    for d, amt in sorted_events:
+    for d, ev in sorted_events:
+        amt = ev["amount"]
         cum += amt
         days_left = max((d - start).days + 1, 1)  # 含今天
         need = cum / days_left
@@ -112,7 +120,7 @@ def compute_budget(packs, recent_avg, today=None):
         "buffer_ratio": buffer_ratio,
         "waste_forecast": waste,
         "critical_event": critical_event,
-        "next_expiries": next_expiries,
+        "expiry_events": expiry_events,
         "recent_avg": round(pace, 1),
         "pack_count": len(alive),
     }
@@ -141,11 +149,13 @@ def build_report_section(budget):
     else:
         lines.append("- ✅ 按近期节奏可基本零浪费\n")
 
-    tops = budget.get("next_expiries") or []
-    if tops:
-        lines.append("**⏰ 最近到期 TOP3:**\n")
-        for i, t in enumerate(tops, 1):
-            lines.append(f"{i}. {t['name']} {t['amount']:.0f} 积分 → {t['expire_str']}\n")
+    events = budget.get("expiry_events") or []
+    if events:
+        lines.append("**⏰ 即将到期明细:**\n\n")
+        for ev in events:
+            comp = " + ".join(
+                f"{it['name']}{it['amount']:.0f}" for it in ev["items"])
+            lines.append(f"- **{ev['date']} 到期 {ev['amount']:.0f} 积分**（{comp}）\n")
 
     return "".join(lines)
 
@@ -155,12 +165,14 @@ if __name__ == "__main__":
     from datetime import datetime as dt
     base = dt.now()
     mock_packs = [
-        {"name": "福利A", "remaining": 785, "expire_time": (base + timedelta(days=7)).timestamp(),
+        {"name": "老用户福利", "remaining": 785, "expire_time": (base + timedelta(days=7)).timestamp(),
          "expire_str": "08-31 19:05", "alive": True},
-        {"name": "签到包", "remaining": 200, "expire_time": (base + timedelta(days=20)).timestamp(),
-         "expire_str": "09-13 07:00", "alive": True},
-        {"name": "会员月度", "remaining": 2000, "expire_time": (base + timedelta(days=30)).timestamp(),
-         "expire_str": "09-23 11:00", "alive": True},
+        {"name": "签到奖励", "remaining": 200, "expire_time": (base + timedelta(days=8)).timestamp(),
+         "expire_str": "09-01 00:21", "alive": True},
+        {"name": "每月登录赠送", "remaining": 500, "expire_time": (base + timedelta(days=7.2)).timestamp(),
+         "expire_str": "08-31 23:59", "alive": True},
+        {"name": "会员Lite月度", "remaining": 2000, "expire_time": (base + timedelta(days=8)).timestamp(),
+         "expire_str": "09-01 11:21", "alive": True},
     ]
     b = compute_budget(mock_packs, recent_avg=190)
     print(json.dumps(b, ensure_ascii=False, indent=2))
