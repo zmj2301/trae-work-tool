@@ -1,12 +1,11 @@
 """TRAE 每日自动任务
 
-由 Windows 计划任务每天定时执行：
+由定时任务（ECS cron / Windows 计划任务）每天执行：
 1. 检查 token 过期时间，30 天内到期则钉钉提醒
 2. 自动签到（已签到则跳过），钉钉通知结果
-3. 调用 trae_usage_api.py 抓取数据并发送每日用量报告
+3. 抓取用量 + 积分包到期分析，推送详细版预算报告
 """
 import json
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,9 +15,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from trae_usage_api import (
     load_config, get_valid_token, api_request,
     load_signin_history, save_signin_history, compute_continuous_days,
-    CONFIG_FILE,
+    collect,
 )
-from dingtalk import send_text, notify_signin, notify_token_warning
+from dingtalk import send_text, send_markdown, notify_signin, notify_token_warning
+from budget import compute_budget, build_report_section
 
 BASE = Path(__file__).parent
 HISTORY_FILE = BASE / "trae_signin_history.json"
@@ -89,6 +89,49 @@ def do_checkin(cfg, token):
     return False, 0, cl.get("message", str(cl))
 
 
+def build_full_report(result):
+    """组装详细版钉钉报告（预算 + 用量 + 签到）。"""
+    daily = result.get("daily") or []
+    today_consumed = daily[-1]["consumed"] if daily else 0
+    today_sessions = daily[-1]["sessions"] if daily else 0
+    usage = result.get("overall_usage") or {}
+    checkin = result.get("checkin") or {}
+
+    # 近7天日均（不含今天）
+    past = [d["consumed"] for d in daily[:-1][-7:]] if len(daily) > 1 else []
+    recent_avg = round(sum(past) / len(past), 1) if past else 0.0
+
+    parts = []
+
+    # 预算分析段
+    try:
+        packs = result.get("packs") or []
+        budget = compute_budget(packs, recent_avg)
+        parts.append(build_report_section(budget))
+    except Exception as e:
+        log(f"预算计算失败: {e}")
+        parts.append(f"### ⚠️ 预算计算失败\n\n{e}\n\n")
+
+    # 用量统计段
+    parts.append("### 📊 用量统计\n\n")
+    parts.append(
+        f"- **今日消耗**: {today_consumed:.1f} 积分 ({today_sessions} 会话)\n"
+        f"- **近7天日均**: {recent_avg} 积分\n"
+        f"- **本月累计**: {result.get('month_total', 0):.1f} 积分\n"
+        f"- **总余额**: {usage.get('remaining', 0):.0f} 积分"
+        f"（总额 {usage.get('total_limit', 0):.0f}）\n")
+
+    # 签到段
+    sign_line = "❌ 未签到"
+    if checkin.get("checked_in"):
+        sign_line = "✅ 已签到 +{} 积分，连续 {} 天".format(
+            checkin.get("credits") or 200, result.get("continuous_days", 0))
+    parts.append(f"- **签到**: {sign_line}\n")
+    parts.append(f"\n> 数据时间: {result.get('fetched_at', '')}\n")
+
+    return "".join(parts)
+
+
 def main():
     print("=" * 55)
     print("TRAE 每日自动任务")
@@ -112,18 +155,16 @@ def main():
         log(f"签到失败: {e}")
         send_text("TRAE 签到失败", f"异常: {e}")
 
-    # 3. 抓取用量 + 每日报告（trae_usage_api 内部会发钉钉）
+    # 3. 抓取数据 + 预算报告（积分包解析失败会抛异常并钉钉报错）
     log("抓取每日用量...")
-    r = subprocess.run(
-        [sys.executable, str(BASE / "trae_usage_api.py")],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    print((r.stdout or b"").decode("utf-8", "replace")[-2000:])
-    if r.returncode != 0:
-        send_text("TRAE 用量抓取失败", f"exit={r.returncode}: {(r.stderr or b'').decode('utf-8', 'replace')[-300:]}")
-        log(f"用量抓取失败 exit={r.returncode}")
-    else:
-        log("用量报告已发送")
+    try:
+        result = collect(7)
+        report = build_full_report(result)
+        ok = send_markdown("TRAE 每日预算报告", report)
+        log("详细预算报告已发送" if ok else "报告发送失败")
+    except Exception as e:
+        log(f"抓取/报告失败: {e}")
+        send_text("TRAE 每日任务报错", f"{type(e).__name__}: {str(e)[:300]}")
 
     print("=" * 55)
     print("完成！")
