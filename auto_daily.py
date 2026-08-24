@@ -40,12 +40,21 @@ def check_token_expiry(cfg):
     if not exp:
         return None
     try:
-        # 兼容 ISO 字符串和毫秒时间戳
+        # 兼容 ISO 字符串和毫秒时间戳（Python 3.6 无 fromisoformat，手动解析）
         if isinstance(exp, str):
-            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            s = exp.replace("Z", "+0000").replace("+00:00", "+0000")
+            exp_dt = None
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+                try:
+                    exp_dt = datetime.strptime(s, fmt)
+                    break
+                except ValueError:
+                    continue
+            if exp_dt is None:
+                return None
         else:
-            exp_dt = datetime.fromtimestamp(exp / 1000, tz=timezone.utc)
-        left = (exp_dt - datetime.now(timezone.utc)).days
+            exp_dt = datetime.utcfromtimestamp(exp / 1000)
+        left = (exp_dt - datetime.now(exp_dt.tzinfo)).days
         return left
     except Exception as e:
         log(f"解析过期时间失败: {e}")
@@ -107,11 +116,11 @@ def main():
     log("抓取每日用量...")
     r = subprocess.run(
         [sys.executable, str(BASE / "trae_usage_api.py")],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    print(r.stdout[-2000:] if r.stdout else "")
+    print((r.stdout or b"").decode("utf-8", "replace")[-2000:])
     if r.returncode != 0:
-        send_text("TRAE 用量抓取失败", f"exit={r.returncode}: {r.stderr[-300:]}")
+        send_text("TRAE 用量抓取失败", f"exit={r.returncode}: {(r.stderr or b'').decode('utf-8', 'replace')[-300:]}")
         log(f"用量抓取失败 exit={r.returncode}")
     else:
         log("用量报告已发送")
