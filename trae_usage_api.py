@@ -25,8 +25,22 @@ try:
 except ImportError:
     HAVE_CRYPTO = False
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:  # Python < 3.7
+        import io
+        try:
+            _wrapped = io.TextIOWrapper(
+                _stream.buffer, encoding="utf-8", errors="replace",
+                line_buffering=_stream.line_buffering,
+            )
+            if _stream is sys.stdout:
+                sys.stdout = _wrapped
+            else:
+                sys.stderr = _wrapped
+        except Exception:
+            pass
 
 BASE = Path(__file__).resolve().parent
 CONFIG_FILE = BASE / "config.json"
@@ -416,6 +430,38 @@ def main():
             writer.writerow([d["date"], d["consumed"], d["sessions"]])
     log(f"✓ CSV已保存: {csv_file}")
     log(f"本月累计消耗: {month_total} 积分")
+
+    # 7. 钉钉通知
+    try:
+        from dingtalk import send_text, send_markdown, notify_daily_usage
+        today_consumed = daily[-1]["consumed"] if daily else 0
+        today_sessions = daily[-1]["sessions"] if daily else 0
+        remaining = usage["remaining"] if usage else 0
+
+        # 每日用量报告
+        send_markdown(
+            "TRAE 每日报告",
+            f"### TRAE 用量报告\n\n"
+            f"- **今日消耗**: {today_consumed:.1f} 积分 ({today_sessions} 会话)\n"
+            f"- **本月累计**: {month_total:.1f} 积分\n"
+            f"- **剩余积分**: {remaining:.0f}\n"
+            f"- **签到状态**: {'已签到 +200' if checked_in else '未签到'}\n"
+            f"- **连续签到**: {continuous_days} 天\n"
+        )
+
+        # 用量异常提醒
+        threshold = 200
+        try:
+            cfg_check = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            threshold = cfg_check.get("daily_consumption_alert_threshold", 200)
+        except Exception:
+            pass
+        notify_daily_usage(today_consumed, threshold)
+
+    except ImportError:
+        pass  # dingtalk.py 不存在，跳过通知
+    except Exception as e:
+        log(f"钉钉通知失败: {e}")
 
     print("=" * 55)
     print("完成！")
