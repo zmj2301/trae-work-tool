@@ -333,6 +333,55 @@ def fetch_credit_usage(cfg, token):
         return None
 
 
+def fetch_entitlement_packs(cfg, token):
+    """获取全部积分包（含各自过期时间）。
+
+    按用户要求：字段缺失或解析失败直接抛异常，不做降级猜测。
+    """
+    try:
+        r = api_request(cfg, "/trae/api/v2/pay/ide_user_ent_usage", token,
+                        body={"require_usage": True, "req_source": 2})
+        d = r.json()
+    except Exception as e:
+        raise RuntimeError(f"积分包接口请求失败: {e}")
+
+    raw = d.get("user_entitlement_pack_list")
+    if raw is None:
+        raise RuntimeError("ide_user_ent_usage 响应缺少 user_entitlement_pack_list 字段")
+
+    now_ts = time.time()
+    packs = []
+    for p in raw:
+        bi = p.get("entitlement_base_info") or {}
+        q = bi.get("quota") or {}
+        us = p.get("usage") or {}
+        try:
+            limit = float(q.get("credits_limit") or 0)
+            used = float(us.get("credits_amount") or 0)
+        except (TypeError, ValueError):
+            limit, used = 0.0, 0.0
+        expire = int(p.get("expire_time") or 0)
+        if limit <= 0 or expire <= 0:
+            continue
+        remaining = round(max(0.0, limit - used), 2)
+        if remaining <= 0:
+            continue  # 已用完的包不参与预算
+        packs.append({
+            "name": p.get("display_desc") or p.get("group_name") or "积分包",
+            "group": p.get("group_name") or "",
+            "limit": limit,
+            "used": used,
+            "remaining": remaining,
+            "expire_time": expire,
+            "expire_str": datetime.fromtimestamp(expire).strftime("%m-%d %H:%M"),
+            "alive": expire > now_ts,
+        })
+    if not packs:
+        raise RuntimeError("未解析到任何有效积分包")
+    packs.sort(key=lambda x: x["expire_time"])
+    return packs
+
+
 def fetch_checkin_status(cfg, token):
     """获取签到状态。"""
     try:
@@ -357,15 +406,11 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="TRAE 每日用量爬取(API版)")
-    parser.add_argument("--days", type=int, default=DAYS, help="抓取天数(默认7)")
-    args = parser.parse_args()
+def collect(days):
+    """抓取全部数据并写入 JSON/CSV，返回 result 字典。
 
-    print("=" * 55)
-    print("TRAE 每日用量爬取 (API版)")
-    print("=" * 55)
-
+    积分包解析失败时抛出 RuntimeError（不做降级猜测）。
+    """
     cfg = load_config()
     token = get_valid_token(cfg)
     log("token 有效，开始抓取...")
@@ -375,7 +420,13 @@ def main():
     if usage:
         log(f"总量: 总额{usage['total_limit']:.0f} / 已耗{usage['total_used']:.0f} / 剩余{usage['remaining']:.0f}")
 
-    # 2. 签到状态 + 连续签到天数
+    # 2. 积分包明细（含各自过期时间）
+    packs = fetch_entitlement_packs(cfg, token)
+    total_alive = sum(p["remaining"] for p in packs if p["alive"])
+    log(f"积分包: {len(packs)} 个有效包, 存量{total_alive:.2f}, 最近到期 "
+        f"{packs[0]['expire_str']} ({packs[0]['remaining']:.0f} 积分)")
+
+    # 3. 签到状态 + 连续签到天数
     checkin = fetch_checkin_status(cfg, token)
     hist = load_signin_history()
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -387,13 +438,13 @@ def main():
         checkin["continuous_days"] = continuous_days
         log(f"签到: checked_in={checkin['checked_in']}, 积分={checkin['credits']}, 连续签到={continuous_days}天")
 
-    # 3. 整月数据(一次API调用，按天分组)
+    # 4. 整月数据(一次API调用，按天分组)
     month_grouped = fetch_month_grouped(cfg, token)
     month_total = round(sum(g["consumed"] for g in month_grouped.values()), 2)
 
-    # 4. 遍历最近 N 天
+    # 5. 遍历最近 N 天
     daily = []
-    for days_ago in range(args.days - 1, -1, -1):
+    for days_ago in range(days - 1, -1, -1):
         date_str = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
         mg = month_grouped.get(date_str, {"consumed": 0.0, "sessions": 0})
         total, count, lines = fetch_daily_session_usage(cfg, token, days_ago)
@@ -406,11 +457,12 @@ def main():
         })
         log(f"{date_str}: 消耗 {total:.2f} 积分 ({count} 会话)")
 
-    # 5. 输出 JSON
+    # 6. 输出 JSON
     result = {
         "user": {"user_id": "719548110874768", "username": "用户94336119047", "product": "solo"},
         "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "overall_usage": usage,
+        "packs": packs,
         "checkin": checkin,
         "month_total": month_total,
         "continuous_days": continuous_days,
@@ -420,7 +472,7 @@ def main():
     json_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"✓ 数据已保存: {json_file}")
 
-    # 6. 输出 CSV
+    # 7. 输出 CSV
     csv_file = BASE / "trae_usage_daily.csv"
     import csv
     with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
@@ -431,25 +483,28 @@ def main():
     log(f"✓ CSV已保存: {csv_file}")
     log(f"本月累计消耗: {month_total} 积分")
 
-    # 7. 钉钉通知
+    return result
+
+
+def push_simple_report(result):
+    """推送简版每日报告到钉钉。"""
     try:
-        from dingtalk import send_text, send_markdown, notify_daily_usage
+        from dingtalk import send_markdown, notify_daily_usage
+        daily = result.get("daily") or []
+        usage = result.get("overall_usage") or {}
         today_consumed = daily[-1]["consumed"] if daily else 0
         today_sessions = daily[-1]["sessions"] if daily else 0
-        remaining = usage["remaining"] if usage else 0
 
-        # 每日用量报告
         send_markdown(
             "TRAE 每日报告",
             f"### TRAE 用量报告\n\n"
             f"- **今日消耗**: {today_consumed:.1f} 积分 ({today_sessions} 会话)\n"
-            f"- **本月累计**: {month_total:.1f} 积分\n"
-            f"- **剩余积分**: {remaining:.0f}\n"
-            f"- **签到状态**: {'已签到 +200' if checked_in else '未签到'}\n"
-            f"- **连续签到**: {continuous_days} 天\n"
+            f"- **本月累计**: {result.get('month_total', 0):.1f} 积分\n"
+            f"- **剩余积分**: {usage.get('remaining', 0):.0f}\n"
+            f"- **签到状态**: {'已签到 +' + str((result.get('checkin') or {}).get('credits') or 200) if (result.get('checkin') or {}).get('checked_in') else '未签到'}\n"
+            f"- **连续签到**: {result.get('continuous_days', 0)} 天\n"
         )
 
-        # 用量异常提醒
         threshold = 200
         try:
             cfg_check = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -462,6 +517,19 @@ def main():
         pass  # dingtalk.py 不存在，跳过通知
     except Exception as e:
         log(f"钉钉通知失败: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="TRAE 每日用量爬取(API版)")
+    parser.add_argument("--days", type=int, default=DAYS, help="抓取天数(默认7)")
+    args = parser.parse_args()
+
+    print("=" * 55)
+    print("TRAE 每日用量爬取 (API版)")
+    print("=" * 55)
+
+    result = collect(args.days)
+    push_simple_report(result)
 
     print("=" * 55)
     print("完成！")
