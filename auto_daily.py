@@ -1,9 +1,11 @@
 """TRAE 每日自动任务
 
-由定时任务（ECS cron / Windows 计划任务）每天执行：
+由定时任务（ECS cron）每天 7 点执行：
 1. 检查 token 过期时间，30 天内到期则钉钉提醒
-2. 自动签到（已签到则跳过），钉钉通知结果
-3. 抓取用量 + 积分包到期分析，推送详细版预算报告
+2. 自动签到（每天，包括上学日）
+3. 按日型分流推送：
+   - 上学日(周一~四/补班周末): 签到简报
+   - 周五下午回家 / 周末 / 法定节假日: 完整预算报告
 """
 import json
 import sys
@@ -18,7 +20,10 @@ from trae_usage_api import (
     collect,
 )
 from dingtalk import send_text, send_markdown, notify_signin, notify_token_warning
-from budget import compute_budget, build_report_section
+from budget import (
+    compute_budget, build_report_section, build_offday_section,
+)
+import school_calendar
 
 BASE = Path(__file__).parent
 HISTORY_FILE = BASE / "trae_signin_history.json"
@@ -132,6 +137,31 @@ def build_full_report(result):
     return "".join(parts)
 
 
+def build_offday_report(result):
+    """上学日简化报告：签到状态 + 到期提醒，一条搞定。"""
+    checkin = result.get("checkin") or {}
+    if checkin.get("checked_in"):
+        sign = "✅ 已签到 +{} 积分，连续 {} 天".format(
+            checkin.get("credits") or 200, result.get("continuous_days", 0))
+    else:
+        sign = "❌ 今日签到失败！"
+
+    parts = ["### TRAE 签到简报\n\n", f"- {sign}\n"]
+
+    try:
+        packs = result.get("packs") or []
+        daily = result.get("daily") or []
+        past = [d["consumed"] for d in daily[:-1][-7:]] if len(daily) > 1 else []
+        avg = round(sum(past) / len(past), 1) if past else 0.0
+        b = compute_budget(packs, avg)
+        parts.append("- " + build_offday_section(b).strip().replace("\n", "\n- "))
+    except Exception as e:
+        log(f"预算计算失败: {e}")
+
+    parts.append(f"\n> 数据时间: {result.get('fetched_at', '')}\n")
+    return "".join(parts)
+
+
 def main():
     print("=" * 55)
     print("TRAE 每日自动任务")
@@ -139,6 +169,9 @@ def main():
 
     cfg = load_config()
     token = get_valid_token(cfg)
+    today_t = school_calendar.day_type()
+    today_label = school_calendar.day_label()
+    log(f"今日日型: {today_t} ({today_label})")
 
     # 1. token 过期检查
     days_left = check_token_expiry(cfg)
@@ -146,22 +179,38 @@ def main():
         log(f"refresh_token 剩余 {days_left} 天")
         notify_token_warning(days_left)
 
-    # 2. 自动签到
+    # 2. 自动签到（上学日不单独推送，合并进简报）
+    signin_result = None
     try:
-        ok, credits, msg = do_checkin(cfg, token)
-        log(f"签到: {msg}")
-        notify_signin(ok, credits, msg)
+        signin_result = do_checkin(cfg, token)
+        log(f"签到: {signin_result[2]}")
+        if today_t != "off":
+            notify_signin(*signin_result)
     except Exception as e:
         log(f"签到失败: {e}")
         send_text("TRAE 签到失败", f"异常: {e}")
+        signin_result = (False, 0, str(e))
 
-    # 3. 抓取数据 + 预算报告（积分包解析失败会抛异常并钉钉报错）
+    # 3. 抓取数据 + 报告
     log("抓取每日用量...")
     try:
         result = collect(7)
-        report = build_full_report(result)
-        ok = send_markdown("TRAE 每日预算报告", report)
-        log("详细预算报告已发送" if ok else "报告发送失败")
+
+        if today_t == "off" and not (result.get("checkin") or {}).get("error"):
+            # 上学日：简化推送
+            report = build_offday_report(result)
+            ok = send_markdown("TRAE 签到简报", report)
+            log("上学日简报已发送" if ok else "发送失败")
+        else:
+            # 周末/节假日/周五下午：完整预算报告
+            report = build_full_report(result)
+            header = f"> 📅 {today_label}\n\n"
+            ok = send_markdown("TRAE 每日预算报告", header + report)
+            log("详细预算报告已发送" if ok else "发送失败")
+
+        # 签到失败时额外告警（任何日型）
+        if signin_result and not signin_result[0]:
+            send_text("TRAE 签到失败", signin_result[2])
     except Exception as e:
         log(f"抓取/报告失败: {e}")
         send_text("TRAE 每日任务报错", f"{type(e).__name__}: {str(e)[:300]}")
