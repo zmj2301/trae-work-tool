@@ -58,8 +58,11 @@ def compute_budget(packs, recent_avg, today=None):
     """
     now = today or datetime.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ts = start.timestamp()
 
-    alive = [dict(p) for p in packs if p.get("alive") and p.get("remaining", 0) > 0]
+    # 只保留基准日之后才过期的包（防御：过期数据/深夜运行时不污染计算）
+    alive = [dict(p) for p in packs
+             if p.get("remaining", 0) > 0 and p.get("expire_time", 0) > start_ts]
     total_alive = round(sum(p["remaining"] for p in alive), 2)
 
     # --- 未来签到投影：每天自动签到 +200，31天后过期 ---
@@ -108,18 +111,28 @@ def compute_budget(packs, recent_avg, today=None):
 
     # --- 防浪费底线 R（每全天可用日的最低消耗）---
     # FIFO 假设下, 到第 k 个到期日前必须累计烧掉前 k 个事件的量
+    buffer_ratio = get_buffer_ratio()
+    hard_cap = round(total_alive * (1 - buffer_ratio), 1)
+
     must_use = 0.0
     critical_event = None
+    infeasible = False  # 存在"到期前完全无可用日"的积分 → 只能尽力而为
     cum = 0.0
     for d, ev in sorted_events:
         amt = ev["amount"]
         cum += amt
         cap = capacity_until(d)
         if cap <= 0:
-            # 截止日前完全无可用日 → 无解，底线视为无穷（报告会显示紧急）
-            need = cum * 10  # 大数标记不可行
-        else:
-            need = cum / cap
+            # 截止日前完全无可用日 → 无法挽救，单独标记
+            infeasible = True
+            critical_event = {
+                "date": d.strftime("%m-%d"),
+                "amount": round(amt, 1),
+                "days_left": (d - start).days,
+                "usable_capacity": 0.0,
+            }
+            continue
+        need = cum / cap
         if need > must_use:
             must_use = need
             critical_event = {
@@ -128,6 +141,9 @@ def compute_budget(packs, recent_avg, today=None):
                 "days_left": (d - start).days,
                 "usable_capacity": round(cap, 1),
             }
+    if infeasible:
+        # 有积分注定浪费：建议按硬上限全力消耗，报告会给出紧急提示
+        must_use = hard_cap
     must_use = round(must_use, 1)
 
     # --- 未来31天浪费预测（只在实际可用的日子按节奏消耗）---
@@ -154,8 +170,6 @@ def compute_budget(packs, recent_avg, today=None):
     waste = round(waste, 1)
 
     # --- 今日建议 ---
-    buffer_ratio = get_buffer_ratio()
-    hard_cap = round(total_alive * (1 - buffer_ratio), 1)
     today_w = school_calendar.day_weight(now)
     today_t = school_calendar.day_type(now)
     if today_w <= 0:
@@ -172,6 +186,7 @@ def compute_budget(packs, recent_avg, today=None):
         "buffer_ratio": buffer_ratio,
         "waste_forecast": waste,
         "critical_event": critical_event,
+        "infeasible": infeasible,
         "expiry_events": expiry_events,
         "recent_avg": round(pace, 1),
         "pack_count": len(alive),
@@ -190,7 +205,11 @@ def build_report_section(budget):
         f"- **今日建议消耗**: {budget['suggested']} 积分"
         f"（{budget['today_label']}，权重{budget['today_weight']}）\n"
         f"- **防浪费底线**: {budget['must_use_per_day']}/全天可用日\n")
-    if ce:
+    if budget.get("infeasible"):
+        lines.append(
+            "- 🔴 **紧急: 部分积分在其到期日之前没有任何可用日，注定浪费！"
+            "建议今天就全力消耗。**\n")
+    elif ce:
         lines.append(
             f"  （因 {ce['amount']} 积分将在 {ce['date']} 到期，"
             f"此前仅剩 {ce['usable_capacity']} 个加权可用日）\n")
