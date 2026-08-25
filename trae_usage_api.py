@@ -441,6 +441,12 @@ def collect(days):
     # 4. 整月数据(一次API调用，按天分组)
     month_grouped = fetch_month_grouped(cfg, token)
     month_total = round(sum(g["consumed"] for g in month_grouped.values()), 2)
+    # 本月单日最高消耗
+    month_peak = {"date": None, "consumed": 0.0, "sessions": 0}
+    for ds, g in month_grouped.items():
+        if g["consumed"] > month_peak["consumed"]:
+            month_peak = {"date": ds, "consumed": g["consumed"],
+                          "sessions": g["sessions"]}
 
     # 5. 遍历最近 N 天
     daily = []
@@ -465,6 +471,7 @@ def collect(days):
         "packs": packs,
         "checkin": checkin,
         "month_total": month_total,
+        "month_peak": month_peak,
         "continuous_days": continuous_days,
         "daily": daily,
     }
