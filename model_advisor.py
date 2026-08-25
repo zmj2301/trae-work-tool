@@ -64,6 +64,20 @@ ECO_CEIL = 150      # >150  → +标准档
 HIGH_CEIL = 300     # >300  → +高配档
 FLAG_CEIL = 500     # >500  → +旗舰档
 
+# 今日预算在各档位间的分配权重（按 allowed tiers 组合取用），
+# 可用 config.json 的 "tier_alloc": {"eco":0.5,"std":0.5,...} 覆盖
+DEFAULT_TIER_ALLOC = {
+    "eco":                   {"eco": 1.0},
+    "eco,std":               {"eco": 0.6, "std": 0.4},
+    "eco,std,high":          {"eco": 0.5, "std": 0.3, "high": 0.2},
+    "eco,std,high,flagship": {"eco": 0.4, "std": 0.3, "high": 0.2, "flagship": 0.1},
+}
+# 有积分注定浪费时：整体向高配/旗舰倾斜，鼓励加速消耗
+INFEASIBLE_ALLOC = {"eco": 0.2, "std": 0.3, "high": 0.3, "flagship": 0.2}
+
+# 历史单次会话平均消耗的兜底值（历史数据不足时使用）
+DEFAULT_AVG_PER_REQ = 25.0
+
 
 def _fmt(x):
     """倍率显示：去掉多余的 0（0.03→0.03, 0.40→0.4, 1.50→1.5）。"""
@@ -214,6 +228,115 @@ def _model_label(m):
     return s + ")"
 
 
+def _avg_eco_per_request():
+    """从 trae_usage_data.json 历史会话明细估算经济档单次平均消耗。
+
+    只统计经济档模型的会话；样本 <3 条或读不到数据时返回兜底值。
+    """
+    try:
+        data = json.loads((BASE / "trae_usage_data.json").read_text(encoding="utf-8"))
+    except Exception:
+        return DEFAULT_AVG_PER_REQ
+    eco_names = {m["name"] for m in MODEL_TABLE if m["tier"] == "eco"}
+    samples = []
+    for d in (data.get("daily") or []):
+        for s in (d.get("details") or []):
+            try:
+                if s.get("model") in eco_names:
+                    samples.append(float(s.get("credits") or 0))
+            except (TypeError, ValueError):
+                continue
+    if len(samples) < 3:
+        return DEFAULT_AVG_PER_REQ
+    return sum(samples) / len(samples)
+
+
+def recommend_allocation(budget, cfg, availability=None):
+    """把今日预算包络按档位拆分，并估算各档位可用任务次数。
+
+    返回 dict:
+    {
+      "envelope": float, "allowed": [tier...], "infeasible": bool,
+      "alloc": [ {"tier", "weight", "credits", "per_req", "count"}, ... ],
+    }
+    """
+    rec = recommend_models(budget, cfg, availability)
+    envelope = rec["envelope"]
+    allowed = rec["allowed_tiers"]
+    table = get_model_table(cfg)
+
+    # 各档位平均倍率（只统计 Lite 可用的模型）
+    tier_mults = {}
+    for t in TIER_ORDER:
+        ms = [m["multiplier"] for m in table
+              if m["tier"] == t and effective_lite(m, availability)]
+        tier_mults[t] = sum(ms) / len(ms) if ms else 0.0
+    eco_mult = tier_mults.get("eco") or 0.07
+
+    # 分配权重
+    if rec["infeasible"]:
+        weights = dict(INFEASIBLE_ALLOC)
+    else:
+        key = ",".join(allowed)
+        weights = dict(DEFAULT_TIER_ALLOC.get(key, {allowed[-1]: 1.0}))
+    # config 覆盖（仅取 allowed 档位）
+    ov = (cfg or {}).get("tier_alloc")
+    if isinstance(ov, dict) and ov:
+        weights = {t: float(ov.get(t, weights.get(t, 0))) for t in allowed}
+    total_w = sum(weights.get(t, 0) for t in allowed) or 1.0
+
+    base = _avg_eco_per_request()
+    alloc = []
+    for t in allowed:
+        w = weights.get(t, 0) / total_w
+        credits = round(envelope * w, 1)
+        tm = tier_mults.get(t) or eco_mult
+        per_req = base * (tm / eco_mult) if eco_mult > 0 else base
+        count = int(round(credits / per_req)) if per_req > 0 and credits > 0 else 0
+        alloc.append({
+            "tier": t, "weight": w, "credits": credits,
+            "per_req": round(per_req, 1), "count": count,
+        })
+    return {
+        "envelope": envelope,
+        "allowed": allowed,
+        "infeasible": rec["infeasible"],
+        "alloc": alloc,
+    }
+
+
+def _alloc_motto(allowed):
+    """按可用档位给一句搭配口诀。"""
+    if allowed == ["eco"]:
+        return "日常任务全用 Seed-Code / DeepSeek-Flash"
+    motto = "日常用 Seed-Code/Flash"
+    if "std" in allowed:
+        motto += "，代码推理上 GLM/MiniMax"
+    if "high" in allowed:
+        motto += "，疑难再上 Kimi/DeepSeek-Pro"
+    if "flagship" in allowed:
+        motto += "，硬骨头留给 Qwen3.8-Max"
+    return motto
+
+
+def build_allocation_section(budget, cfg, availability=None):
+    """渲染「📐 今日分配建议」markdown 片段；包络为 0（上学日）时不输出。"""
+    a = recommend_allocation(budget, cfg, availability)
+    if a["envelope"] <= 0:
+        return ""
+    lines = [f"### 📐 今日分配建议（包络 {a['envelope']:.0f} 积分）\n"]
+    for it in a["alloc"]:
+        if it["credits"] <= 0:
+            continue
+        count_txt = (f"约 {it['count']} 次" if it["count"] > 0
+                     else "不足 1 次")
+        lines.append(
+            f"- {TIER_LABEL[it['tier']]} ≈ **{it['credits']:.0f} 积分**"
+            f"（{int(round(it['weight'] * 100))}%，{count_txt}）\n")
+    lines.append(f"- 口诀：{_alloc_motto(a['allowed'])}（次数为估算）\n")
+    return "".join(lines)
+
+
 def build_model_section(budget, cfg, availability=None):
     """渲染「🤖 模型推荐」markdown 片段。"""
     rec = recommend_models(budget, cfg, availability)
@@ -235,6 +358,8 @@ def build_model_section(budget, cfg, availability=None):
     if blocked:
         names = "、".join(_model_label(m) for m in blocked)
         lines.append(f"- ⛔ **Lite 会员不可用**（请勿选择）：{names}\n")
+
+    lines.append(build_allocation_section(budget, cfg, availability))
 
     lines.append(f"- {rec['note']}\n")
     return "".join(lines)
