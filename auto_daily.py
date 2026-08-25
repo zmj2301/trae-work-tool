@@ -121,9 +121,15 @@ def build_full_report(result, availability=None, cfg=None):
 
     # 用量统计段
     parts.append("### 📊 用量统计\n\n")
+    peak = result.get("month_peak") or {}
+    peak_line = ""
+    if peak.get("date"):
+        peak_line = (f"- **单日最高**: {peak['consumed']:.1f} 积分"
+                     f"（{peak['date'][5:]}，{peak['sessions']} 会话）\n")
     parts.append(
         f"- **今日消耗**: {today_consumed:.1f} 积分 ({today_sessions} 会话)\n"
         f"- **近7天日均**: {recent_avg} 积分\n"
+        f"{peak_line}"
         f"- **本月累计**: {result.get('month_total', 0):.1f} 积分\n"
         f"- **总余额**: {usage.get('remaining', 0):.0f} 积分"
         f"（总额 {usage.get('total_limit', 0):.0f}）\n")
