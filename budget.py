@@ -202,8 +202,9 @@ def build_report_section(budget):
     lines = []
     lines.append(f"### 🎯 今日额度建议\n")
     lines.append(
-        f"- **今日建议消耗**: {budget['suggested']} 积分"
-        f"（{budget['today_label']}，权重{budget['today_weight']}）\n"
+        f"- **今日最低消耗**: {budget['suggested']} 积分"
+        f"（防浪费底线，多用不亏；{budget['today_label']}，"
+        f"权重{budget['today_weight']}）\n"
         f"- **防浪费底线**: {budget['must_use_per_day']}/全天可用日\n")
     if budget.get("infeasible"):
         lines.append(
