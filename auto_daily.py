@@ -24,6 +24,7 @@ from budget import (
     compute_budget, build_report_section, build_offday_section,
 )
 import school_calendar
+import model_advisor
 
 BASE = Path(__file__).parent
 HISTORY_FILE = BASE / "trae_signin_history.json"
@@ -94,7 +95,7 @@ def do_checkin(cfg, token):
     return False, 0, cl.get("message", str(cl))
 
 
-def build_full_report(result):
+def build_full_report(result, availability=None, cfg=None):
     """组装详细版钉钉报告（预算 + 用量 + 签到）。"""
     daily = result.get("daily") or []
     today_consumed = daily[-1]["consumed"] if daily else 0
@@ -113,6 +114,7 @@ def build_full_report(result):
         packs = result.get("packs") or []
         budget = compute_budget(packs, recent_avg)
         parts.append(build_report_section(budget))
+        parts.append(model_advisor.build_model_section(budget, cfg, availability))
     except Exception as e:
         log(f"预算计算失败: {e}")
         parts.append(f"### ⚠️ 预算计算失败\n\n{e}\n\n")
@@ -137,7 +139,7 @@ def build_full_report(result):
     return "".join(parts)
 
 
-def build_offday_report(result):
+def build_offday_report(result, availability=None, cfg=None):
     """上学日简化报告：签到状态 + 到期提醒，一条搞定。"""
     checkin = result.get("checkin") or {}
     if checkin.get("checked_in"):
@@ -155,6 +157,7 @@ def build_offday_report(result):
         avg = round(sum(past) / len(past), 1) if past else 0.0
         b = compute_budget(packs, avg)
         parts.append("- " + build_offday_section(b).strip().replace("\n", "\n- "))
+        parts.append("- " + model_advisor.build_model_section(b, cfg, availability).strip().replace("\n", "\n- "))
     except Exception as e:
         log(f"预算计算失败: {e}")
 
@@ -194,16 +197,27 @@ def main():
     # 3. 抓取数据 + 报告
     log("抓取每日用量...")
     try:
+        # 尝试探测账号实际可用模型（Lite 限制），失败则回退内置清单
+        try:
+            availability = model_advisor.fetch_model_availability(cfg, token)
+            if availability is not None:
+                log(f"模型可用性探测成功: {len(availability)} 个模型")
+            else:
+                log("模型可用性探测未启用/失败，使用内置清单")
+        except Exception as e:
+            log(f"模型可用性探测异常: {e}")
+            availability = None
+
         result = collect(7)
 
         if today_t == "off" and not (result.get("checkin") or {}).get("error"):
             # 上学日：简化推送
-            report = build_offday_report(result)
+            report = build_offday_report(result, availability, cfg)
             ok = send_markdown("TRAE 签到简报", report)
             log("上学日简报已发送" if ok else "发送失败")
         else:
             # 周末/节假日/周五下午：完整预算报告
-            report = build_full_report(result)
+            report = build_full_report(result, availability, cfg)
             header = f"> 📅 {today_label}\n\n"
             ok = send_markdown("TRAE 每日预算报告", header + report)
             log("详细预算报告已发送" if ok else "发送失败")
