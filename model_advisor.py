@@ -59,10 +59,26 @@ TIER_HINT = {
     "flagship": "最强但最贵",
 }
 
-# 预算包络（今日 suggested）-> 允许档位
-ECO_CEIL = 150      # >150  → +标准档
-HIGH_CEIL = 300     # >300  → +高配档
-FLAG_CEIL = 500     # >500  → +旗舰档
+# —— 动态调档阈值（基于总余额 + 可用天数 + 浪费占比）——
+REMAINING_HIGH = 500    # 余额 >500 → 可开高配
+REMAINING_MED  = 300    # 余额 >300 → 可开标准
+REMAINING_LOW  = 100    # 余额 >100 → 经济+标准，否则仅经济
+DAYS_URGENT    = 15     # 可用天数 <15 → 加速消耗
+DAYS_MODERATE  = 20     # 可用天数 <20 → 均衡
+WASTE_RATIO_TH = 0.30   # 浪费占比 >30% → 紧急烧分
+
+# —— 场景化映射：档位 → (场景标签, 首选模型, 备选模型) ——
+SCENARIO_MAP = {
+    "eco":      ("日常对话", "Seed-Code",       "DeepSeek-V4-Flash"),
+    "std":      ("编程任务", "GLM-5.2",         "Qwen3.7-Plus"),
+    "high":     ("疑难推理", "Kimi-K2.7-Code",  "DeepSeek-V4-Pro"),
+    "flagship": ("终极能力", "Qwen3.8-Max",     None),
+}
+
+# 预算包络（今日 suggested）-> 允许档位（旧版固定阈值，已弃用，保留作参考）
+ECO_CEIL = 150
+HIGH_CEIL = 300
+FLAG_CEIL = 500
 
 # 今日预算在各档位间的分配权重（按 allowed tiers 组合取用），
 # 可用 config.json 的 "tier_alloc": {"eco":0.5,"std":0.5,...} 覆盖
@@ -165,24 +181,52 @@ def effective_lite(m, availability):
     return bool(m["lite"])
 
 
-def recommend_models(budget, cfg, availability=None):
-    """根据预算与会员限制，给出模型推荐结构。"""
-    table = get_model_table(cfg)
+def compute_dynamic_tiers(budget):
+    """根据总余额、可用天数、浪费占比动态决定开放哪些档位。
+
+    返回 (allowed_tiers, mode_key, context_msg)。
+    """
+    remaining = float(budget.get("total_alive", 0) or 0)
+    infeasible = bool(budget.get("infeasible"))
     today_type = budget.get("today_type", "full")
+    today_weight = float(budget.get("today_weight", 1) or 0)
+    waste_forecast = float(budget.get("waste_forecast", 0) or 0)
+    recent_avg = float(budget.get("recent_avg", 0) or 0)
+
+    # 上学日：仅经济
+    if today_type == "off" or today_weight <= 0:
+        return ["eco"], "off", "上学日：白天不主动消耗"
+
+    # 浪费危机：全档开放
+    waste_ratio = waste_forecast / remaining if remaining > 0 else 0
+    if infeasible or waste_ratio > WASTE_RATIO_TH:
+        return list(TIER_ORDER), "burn", "有积分即将过期，全档开放加速消耗"
+
+    # 可用天数
+    days_left = remaining / recent_avg if recent_avg > 0 else 30
+
+    # 动态调档
+    if remaining > REMAINING_HIGH and days_left < DAYS_URGENT:
+        return (["eco", "std", "high"], "accelerate",
+                f"余额充裕但仅约 {days_left:.0f} 天可用，多用标准/高配档烧积分")
+    if remaining > REMAINING_MED and days_left < DAYS_MODERATE:
+        return (["eco", "std"], "balanced",
+                f"余额 {remaining:.0f}，约 {days_left:.0f} 天可用，均衡使用")
+    if remaining > REMAINING_LOW:
+        return (["eco", "std"], "conservative",
+                f"余额 {remaining:.0f}，保守使用经济/标准档")
+    return (["eco"], "minimal",
+            f"余额仅 {remaining:.0f}，只用最省的经济档")
+
+
+def recommend_models(budget, cfg, availability=None):
+    """根据预算与会员限制，给出模型推荐结构（动态调档版）。"""
+    table = get_model_table(cfg)
     envelope = float(budget.get("suggested", 0) or 0)
     infeasible = bool(budget.get("infeasible"))
-    weight = float(budget.get("today_weight", 1) or 0)
 
-    if today_type == "off" or weight <= 0:
-        allowed = ["eco"]
-    elif infeasible or envelope > FLAG_CEIL:
-        allowed = list(TIER_ORDER)
-    elif envelope > HIGH_CEIL:
-        allowed = ["eco", "std", "high"]
-    elif envelope > ECO_CEIL:
-        allowed = ["eco", "std"]
-    else:
-        allowed = ["eco"]
+    # 动态调档（替代旧版固定阈值）
+    allowed, mode, context_msg = compute_dynamic_tiers(budget)
 
     tiers = {t: [] for t in TIER_ORDER}
     lite_blocked = []
@@ -195,28 +239,15 @@ def recommend_models(budget, cfg, availability=None):
         if m["tier"] in allowed:
             tiers[m["tier"]].append(em)
 
-    if infeasible:
-        note = "🔴 有积分在其到期前无可用日、注定浪费，建议今天就上高配/旗舰加速消耗。"
-    elif today_type == "off" or weight <= 0:
-        note = "📚 上学日：白天不主动用；若晚上可用，用经济档省着花。"
-    elif envelope <= ECO_CEIL:
-        note = f"今日预算包络仅 {envelope:.0f} 积分，用经济档（×0.1 级别）足够。"
-    elif envelope <= HIGH_CEIL:
-        note = f"今日预算包络 {envelope:.0f} 积分，经济/标准档都行。"
-    elif envelope <= FLAG_CEIL:
-        note = f"今日预算包络 {envelope:.0f} 积分，可上高配档，旗舰留给硬骨头。"
-    else:
-        note = (f"今日预算充裕（{envelope:.0f} 积分），全档开放；"
-                f"Kimi-K3 为 Lite 锁定不可用。")
-
     return {
-        "today_type": today_type,
+        "today_type": budget.get("today_type", "full"),
         "envelope": envelope,
         "infeasible": infeasible,
         "allowed_tiers": allowed,
         "tiers": tiers,
         "lite_blocked": lite_blocked,
-        "note": note,
+        "mode": mode,
+        "context_msg": context_msg,
     }
 
 
@@ -307,16 +338,12 @@ def recommend_allocation(budget, cfg, availability=None):
 
 def _alloc_motto(allowed):
     """按可用档位给一句搭配口诀。"""
-    if allowed == ["eco"]:
-        return "日常任务全用 Seed-Code / DeepSeek-Flash"
-    motto = "日常用 Seed-Code/Flash"
-    if "std" in allowed:
-        motto += "，代码推理上 GLM/MiniMax"
-    if "high" in allowed:
-        motto += "，疑难再上 Kimi/DeepSeek-Pro"
-    if "flagship" in allowed:
-        motto += "，硬骨头留给 Qwen3.8-Max"
-    return motto
+    parts = []
+    for t in allowed:
+        if t in SCENARIO_MAP:
+            scenario, top, _ = SCENARIO_MAP[t]
+            parts.append(f"{scenario}用 {top}")
+    return "、".join(parts) if parts else "全用 Seed-Code"
 
 
 def build_allocation_section(budget, cfg, availability=None):
@@ -338,31 +365,57 @@ def build_allocation_section(budget, cfg, availability=None):
 
 
 def build_model_section(budget, cfg, availability=None):
-    """渲染「🤖 模型推荐」markdown 片段。"""
+    """渲染「🤖 模型推荐」markdown 片段（场景化 + 动态调档版）。"""
     rec = recommend_models(budget, cfg, availability)
-    lines = [f"### 🤖 模型推荐（今日预算包络 ≈ {rec['envelope']:.0f} 积分）\n"]
+    alloc = recommend_allocation(budget, cfg, availability)
+    remaining = float(budget.get("total_alive", 0) or 0)
+    mode = rec["mode"]
+    context_msg = rec["context_msg"]
 
-    any_model = False
-    for tier in TIER_ORDER:
+    MODE_LABEL = {
+        "burn": "🔥 紧急烧分", "accelerate": "⚡ 加速消耗",
+        "balanced": "📊 均衡使用", "conservative": "🛡️ 保守模式",
+        "minimal": "💰 最省模式", "off": "📅 上学日",
+    }
+    mode_label = MODE_LABEL.get(mode, "")
+
+    lines = [f"### 🤖 模型推荐（余额 {remaining:.0f}，{mode_label}）\n"]
+
+    alloc_map = {a["tier"]: a for a in alloc.get("alloc", [])}
+
+    for tier in rec["allowed_tiers"]:
         models = rec["tiers"].get(tier) or []
         if not models:
             continue
-        any_model = True
-        names = "、".join(_model_label(m) for m in models)
-        lines.append(f"- {TIER_LABEL[tier]}（{TIER_HINT[tier]}）\n  {names}\n")
+        scenario, top_name, alt_name = SCENARIO_MAP.get(tier, ("通用", None, None))
+        a_info = alloc_map.get(tier, {})
+        count = a_info.get("count", 0)
+        count_txt = f"，今天约 {count} 次" if count > 0 else ""
 
-    if not any_model:
-        lines.append("- （当前预算/日型下无推荐模型）\n")
+        top_m = next((m for m in models if m["name"] == top_name), None)
+        alt_m = (next((m for m in models if m["name"] == alt_name), None)
+                 if alt_name else None)
+
+        if top_m:
+            tag_txt = f" {top_m['tag']}" if top_m.get("tag") else ""
+            lines.append(
+                f"- {TIER_LABEL[tier]} → **{top_m['name']}**"
+                f"(×{_fmt(top_m['multiplier'])}){tag_txt}{count_txt}")
+            if alt_m:
+                lines.append(
+                    f"  备选：{alt_m['name']}(×{_fmt(alt_m['multiplier'])})")
+        else:
+            names = "、".join(_model_label(m) for m in models[:2])
+            lines.append(f"- {TIER_LABEL[tier]}：{names}{count_txt}")
 
     blocked = rec["lite_blocked"]
     if blocked:
-        names = "、".join(_model_label(m) for m in blocked)
-        lines.append(f"- ⛔ **Lite 会员不可用**（请勿选择）：{names}\n")
+        names = "、".join(m["name"] for m in blocked)
+        lines.append(f"- ⛔ Lite 不可用：{names}")
 
-    lines.append(build_allocation_section(budget, cfg, availability))
-
-    lines.append(f"- {rec['note']}\n")
-    return "".join(lines)
+    lines.append(f"- 💡 {context_msg}")
+    lines.append("")  # 空行
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
