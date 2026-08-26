@@ -9,6 +9,7 @@
 """
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,8 +29,11 @@ import model_advisor
 
 BASE = Path(__file__).parent
 HISTORY_FILE = BASE / "trae_signin_history.json"
+MARKER = BASE / "last_run_ok"  # 成功标记（晚间守护检查用）
 
 TOKEN_WARN_DAYS = 30
+# 签到重试等待（秒）：失败后 1 分钟、5 分钟各重试一次
+CHECKIN_RETRY_WAITS = (60, 300)
 
 
 def log(msg):
@@ -93,6 +97,22 @@ def do_checkin(cfg, token):
         days = compute_continuous_days(hist, today_str)
         return True, credits, f"签到成功 +{credits}，连续 {days} 天"
     return False, 0, cl.get("message", str(cl))
+
+
+def do_checkin_retry(cfg, token, waits=CHECKIN_RETRY_WAITS):
+    """签到，失败按 waits 依次重试（防网络抖动断签）。幂等：已签返回成功。"""
+    result = (False, 0, "未执行")
+    for i, wait in enumerate((0,) + tuple(waits)):
+        if wait:
+            log(f"签到未成功，{wait} 秒后重试（第 {i} 次）...")
+            time.sleep(wait)
+        try:
+            result = do_checkin(cfg, token)
+        except Exception as e:
+            result = (False, 0, f"异常: {e}")
+        if result[0]:
+            return result
+    return result
 
 
 def build_full_report(result, availability=None, cfg=None):
@@ -188,10 +208,10 @@ def main():
         log(f"refresh_token 剩余 {days_left} 天")
         notify_token_warning(days_left)
 
-    # 2. 自动签到（上学日不单独推送，合并进简报）
+    # 2. 自动签到（上学日不单独推送，合并进简报；失败自动重试）
     signin_result = None
     try:
-        signin_result = do_checkin(cfg, token)
+        signin_result = do_checkin_retry(cfg, token)
         log(f"签到: {signin_result[2]}")
         if today_t != "off":
             notify_signin(*signin_result)
@@ -200,40 +220,54 @@ def main():
         send_text("TRAE 签到失败", f"异常: {e}")
         signin_result = (False, 0, str(e))
 
-    # 3. 抓取数据 + 报告
+    # 3. 抓取数据 + 报告（失败自动重试一次）
     log("抓取每日用量...")
-    try:
-        # 尝试探测账号实际可用模型（Lite 限制），失败则回退内置清单
+    report_ok = False
+    for attempt in (1, 2):
         try:
-            availability = model_advisor.fetch_model_availability(cfg, token)
-            if availability is not None:
-                log(f"模型可用性探测成功: {len(availability)} 个模型")
+            # 尝试探测账号实际可用模型（Lite 限制），失败则回退内置清单
+            try:
+                availability = model_advisor.fetch_model_availability(cfg, token)
+                if availability is not None:
+                    log(f"模型可用性探测成功: {len(availability)} 个模型")
+                else:
+                    log("模型可用性探测未启用/失败，使用内置清单")
+            except Exception as e:
+                log(f"模型可用性探测异常: {e}")
+                availability = None
+
+            result = collect(7)
+
+            if today_t == "off" and not (result.get("checkin") or {}).get("error"):
+                # 上学日：简化推送
+                report = build_offday_report(result, availability, cfg)
+                ok = send_markdown("TRAE 签到简报", report)
+                log("上学日简报已发送" if ok else "发送失败")
             else:
-                log("模型可用性探测未启用/失败，使用内置清单")
+                # 周末/节假日/周五下午：完整预算报告
+                report = build_full_report(result, availability, cfg)
+                header = f"> 📅 {today_label}\n\n"
+                ok = send_markdown("TRAE 每日预算报告", header + report)
+                log("详细预算报告已发送" if ok else "发送失败")
+
+            # 签到失败时额外告警（任何日型）
+            if signin_result and not signin_result[0]:
+                send_text("TRAE 签到失败", signin_result[2])
+            report_ok = True
+            break
         except Exception as e:
-            log(f"模型可用性探测异常: {e}")
-            availability = None
+            if attempt == 1:
+                log(f"抓取/报告失败: {e}，60 秒后重试一次")
+                time.sleep(60)
+            else:
+                log(f"抓取/报告重试仍失败: {e}")
+                send_text("TRAE 每日任务报错", f"{type(e).__name__}: {str(e)[:300]}")
 
-        result = collect(7)
-
-        if today_t == "off" and not (result.get("checkin") or {}).get("error"):
-            # 上学日：简化推送
-            report = build_offday_report(result, availability, cfg)
-            ok = send_markdown("TRAE 签到简报", report)
-            log("上学日简报已发送" if ok else "发送失败")
-        else:
-            # 周末/节假日/周五下午：完整预算报告
-            report = build_full_report(result, availability, cfg)
-            header = f"> 📅 {today_label}\n\n"
-            ok = send_markdown("TRAE 每日预算报告", header + report)
-            log("详细预算报告已发送" if ok else "发送失败")
-
-        # 签到失败时额外告警（任何日型）
-        if signin_result and not signin_result[0]:
-            send_text("TRAE 签到失败", signin_result[2])
+    # 4. 写成功标记（晚间守护检查据此判断今早任务是否跑过）
+    try:
+        MARKER.write_text(str(time.time()), encoding="utf-8")
     except Exception as e:
-        log(f"抓取/报告失败: {e}")
-        send_text("TRAE 每日任务报错", f"{type(e).__name__}: {str(e)[:300]}")
+        log(f"写标记失败: {e}")
 
     print("=" * 55)
     print("完成！")
