@@ -23,6 +23,9 @@ CONFIG_FILE = Path(__file__).parent / "config.json"
 HORIZON_DAYS = 31
 CHECKIN_CREDITS = 200
 
+# 用户只能在晚上用电脑；中午前到期的积分包 = 前一天晚上就用不了了
+_USER_AVAIL_HOUR = 12  # 中午12点为界：之前到期 → 算作前一天
+
 
 def _cfg():
     try:
@@ -42,6 +45,21 @@ def get_buffer_ratio():
 def project_checkins_enabled():
     """是否把未来的自动签到包计入预测（默认开启）。"""
     return bool(_cfg().get("project_future_checkins", True))
+
+
+def _last_usable_ts(pack):
+    """pack 的最后可用时刻（用户只能晚上用电脑，中午前到期 = 前一天晚上）。
+
+    返回 Unix 时间戳，用于替代原始 expire_time 参与可用日计算。
+    """
+    expire_dt = datetime.fromtimestamp(pack["expire_time"])
+    if expire_dt.hour < _USER_AVAIL_HOUR:
+        # 中午前到期 → 最后可用 = 前一天 23:00
+        last = expire_dt - timedelta(days=1)
+        last = last.replace(hour=23, minute=0, second=0, microsecond=0)
+    else:
+        last = expire_dt
+    return last.timestamp()
 
 
 def compute_budget(packs, recent_avg, today=None):
@@ -80,9 +98,11 @@ def compute_budget(packs, recent_avg, today=None):
             pool_packs.append(proj)
 
     # --- 到期事件按天分组（含包组成明细）---
+    # 中午前到期的包 → 算作前一天到期（用户中午前用不了电脑）
     events = {}
     for p in pool_packs:
-        d = datetime.fromtimestamp(p["expire_time"]).replace(
+        usable_ts = _last_usable_ts(p)
+        d = datetime.fromtimestamp(usable_ts).replace(
             hour=0, minute=0, second=0, microsecond=0)
         ev = events.setdefault(d, {"amount": 0.0, "items": {}})
         ev["amount"] += p["remaining"]
@@ -154,9 +174,10 @@ def compute_budget(packs, recent_avg, today=None):
         day = start + timedelta(days=day_i)
         w = school_calendar.day_weight(day)
         day_end_ts = (day + timedelta(days=1)).timestamp()
-        # 先处理当天到期的包
+        # 先处理当天到期的包（用调整后的时间：中午前到期 → 算作前一天）
         for p in pool:
-            if 0 < p["expire_time"] < day_end_ts and p["remaining"] > 0:
+            usable_ts = _last_usable_ts(p)
+            if 0 < usable_ts < day_end_ts and p["remaining"] > 0:
                 waste += p["remaining"]
                 p["remaining"] = 0.0
         # 可用日才消耗（先吃快过期的）
